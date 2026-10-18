@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+default_models=(
+  opencode/deepseek-v4.1-flash-free
+  opencode/glm-5.3-flash-free
+  opencode/mimo-v2.6-flash-free
+  opencode/big-pickle
+)
+
+models=()
+while getopts m: opt; do
+  case "$opt" in
+    m) models+=("$OPTARG") ;;
+    *) exit 2 ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+if [[ ${#models[@]} -eq 0 ]]; then
+  if [[ -n "${OC_DELEGATE_MODELS:-}" ]]; then
+    read -ra models <<< "$OC_DELEGATE_MODELS"
+  else
+    models=("${default_models[@]}")
+  fi
+fi
+
+if [[ $# -eq 0 ]]; then
+  echo "usage: oc-delegate [-m provider/model]... \"task\"" >&2
+  exit 2
+fi
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  echo "oc-delegate: not inside a git repo; refusing so edits stay reviewable" >&2
+  exit 1
+fi
+
+top="$(git rev-parse --show-toplevel)"
+real_index="$(git rev-parse --path-format=absolute --git-path index)"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+snapshot() {
+  rm -f "$tmp/index"
+  [[ -f "$real_index" ]] && cp "$real_index" "$tmp/index"
+  GIT_INDEX_FILE="$tmp/index" git -C "$top" add -A >/dev/null 2>&1
+  GIT_INDEX_FILE="$tmp/index" git -C "$top" write-tree
+}
+
+touched_paths() {
+  jq -r 'select(.type == "tool_use") | .part.state.input | objects | (.path, .filePath) | strings' "$1" 2>/dev/null \
+    | while IFS= read -r p; do
+        [[ "$p" == /* ]] || p="$PWD/$p"
+        realpath -m -- "$p"
+      done | sort -u
+}
+
+rollback() {
+  local before="$1" out="$2" after status path abs
+  after="$(snapshot)"
+  [[ "$before" == "$after" ]] && return
+  touched_paths "$out" > "$tmp/touched"
+  while IFS= read -r -d '' status && IFS= read -r -d '' path; do
+    abs="$top/$path"
+    if ! grep -qxF -- "$abs" "$tmp/touched"; then
+      echo "  left alone (not edited by worker): $path" >&2
+      continue
+    fi
+    if [[ "$status" == A ]]; then
+      rm -f -- "$abs"
+    else
+      git -C "$top" restore --source="$before" --worktree -- ":(literal)$path"
+    fi
+    echo "  reverted: $path" >&2
+  done < <(git diff-tree -r -z --no-renames --name-status "$before" "$after")
+}
+
+run_model() {
+  local model="$1" out="$2" pid start last_change size last_size=-1
+  timed_out=""
+  opencode run --standalone --agent cc-worker -m "$model" --format json \
+    --title "cc: ${task:0:40}" "$task" > "$out" 2> "$tmp/err" &
+  pid=$!
+  start=$SECONDS
+  last_change=$SECONDS
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep 2
+    size="$(stat -c %s "$out" 2>/dev/null || echo 0)"
+    if [[ "$size" != "$last_size" ]]; then
+      last_size="$size"
+      last_change=$SECONDS
+    fi
+    if (( SECONDS - last_change >= idle )); then
+      timed_out="no output for ${idle}s"
+    elif (( SECONDS - start >= limit )); then
+      timed_out="timed out after ${limit}s"
+    fi
+    if [[ -n "$timed_out" ]]; then
+      kill "$pid" 2>/dev/null
+      for _ in 1 2 3 4 5; do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 1
+      done
+      kill -9 "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null
+      return 124
+    fi
+  done
+  wait "$pid"
+}
+
+log_run() {
+  local summary="${task//[$'\t\n']/ }" detail="${3//[$'\t\n']/ }"
+  mkdir -p -- "$(dirname -- "$log")" 2>/dev/null
+  printf '%s\t%s\t%s\t%ss\t%s\t%s\t%s\n' "$(date -Is)" "$1" "$2" "$((SECONDS - attempt_start))" \
+    "$top" "${detail:0:120}" "${summary:0:100}" >> "$log" 2>/dev/null
+}
+
+task="$*"
+limit="${OC_DELEGATE_TIMEOUT:-600}"
+idle="${OC_DELEGATE_IDLE:-120}"
+log="${OC_DELEGATE_LOG:-${XDG_STATE_HOME:-$HOME/.local/state}/oc-delegate.log}"
+before="$(snapshot)"
+
+for model in "${models[@]}"; do
+  out="$tmp/out.jsonl"
+  attempt_start=$SECONDS
+  run_model "$model" "$out"
+  code=$?
+
+  err="$(jq -r 'select(.type == "error") | "\(.error.type // "error"): \(.error.message // (.error | tostring))"' "$out" 2>/dev/null | tail -n 1)"
+  text="$(jq -r 'select(.type == "text") | .part.text' "$out" 2>/dev/null)"
+  if [[ -n "$timed_out" ]]; then
+    err="$timed_out"
+  elif [[ $code -ne 0 && -z "$err" ]]; then
+    err="exit $code: $(tail -n 3 "$tmp/err" | tr '\n' ' ')"
+  elif [[ -z "$err" && -z "$text" ]]; then
+    err="no response text"
+  fi
+
+  if [[ -z "$err" ]]; then
+    after="$(snapshot)"
+    echo "model: $model"
+    echo "changed:"
+    changes="$(git diff-tree -r --no-renames --name-status "$before" "$after")"
+    if [[ -n "$changes" ]]; then
+      sed 's/^/  /' <<< "$changes"
+    else
+      echo "  (none)"
+    fi
+    log_run ok "$model" "$(grep -c . <<< "$changes") files changed"
+    tool_errors="$(jq -r 'select(.type == "tool_use" and .part.state.status == "error") | "  \(.part.tool): \(.part.state.error // .part.state.output // "" | tostring | .[0:120])"' "$out" 2>/dev/null | head -n 5)"
+    [[ -n "$tool_errors" ]] && printf 'tool errors:\n%s\n' "$tool_errors"
+    echo "---"
+    printf '%s\n' "$text" | tail -n "${OC_DELEGATE_TAIL:-40}"
+    exit 0
+  fi
+
+  echo "oc-delegate: $model failed ($err)" >&2
+  log_run fail "$model" "$err"
+  rollback "$before" "$out"
+done
+
+echo "oc-delegate: all models failed (${models[*]})" >&2
+exit 1
