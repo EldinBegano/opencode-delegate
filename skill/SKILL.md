@@ -52,10 +52,11 @@ Do it yourself instead when:
 
 ## Models
 
-- Default chain, tried in order: `deepseek-v4.1-flash-free` → `glm-5.3-flash-free` → `mimo-v2.6-flash-free` → `big-pickle`, all under `opencode/`. Override the chain with repeated `-m` flags or `OC_DELEGATE_MODELS="a b c"`.
+- Default chain, tried in order: `beam-free` → `space-bunny-free` → `deepseek-v4.1-flash-free` → `mimo-v2.6-flash-free` → `big-pickle`, all under `opencode/`. Override the chain with repeated `-m` flags or `OC_DELEGATE_MODELS="a b c"`.
 - Run errors and hangs are handled by the wrapper. A run that succeeds but gives a wrong result is not: revert the worker's files yourself, then either retry with `-m` starting at the next model or do the task yourself. Don't retry more than once.
 - If "all models failed", do the task yourself and tell the user the free models were unavailable.
-- Avoid `nemotron-3-ultra-free`: it hung with no output when tested on 2026-10-16.
+- Benchmarked 2026-10-18 (docstrings + tests, multi-file rename): beam-free and space-bunny-free were fastest and clean on every run. space-bunny-free is an anonymous preview and may disappear.
+- Avoid `glm-5.3-flash-free` (endpoint often unavailable, 80–90s to fail) and `nemotron-3.5-lightning-free` (hangs). `longcat-2.5-preview-free` and `nemotron-3.5-super-vl-free` work but are slow and wrote wrong test assertions.
 - The free lineup changes; list the current models with `opencode models | grep free`.
 
 ## Privacy

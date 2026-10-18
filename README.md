@@ -111,7 +111,7 @@ tail -n 1 ~/.local/state/oc-delegate.log
 Expected output, roughly:
 
 ```
-model: opencode/deepseek-v4.1-flash-free
+model: opencode/beam-free
 changed:
   M	list.txt
 ---
@@ -129,9 +129,9 @@ To force it, say "delegate this", "use opencode" or "use the free model", or typ
 You can also run the wrapper yourself from inside any git repo:
 
 ```sh
-oc-delegate "task"                                  # default model chain
-oc-delegate -m opencode/glm-5.3-flash-free "task"   # one model, no fallback
-oc-delegate -m model-a -m model-b "task"            # your own chain
+oc-delegate "task"                                       # default model chain
+oc-delegate -m opencode/deepseek-v4.1-flash-free "task"   # one model, no fallback
+oc-delegate -m model-a -m model-b "task"                 # your own chain
 ```
 
 ### Settings
@@ -148,12 +148,25 @@ oc-delegate -m model-a -m model-b "task"            # your own chain
 
 The default chain, tried in order, is:
 
-1. `opencode/deepseek-v4.1-flash-free`
-2. `opencode/glm-5.3-flash-free`
-3. `opencode/mimo-v2.6-flash-free`
-4. `opencode/big-pickle`
+1. `opencode/beam-free`
+2. `opencode/space-bunny-free`
+3. `opencode/deepseek-v4.1-flash-free`
+4. `opencode/mimo-v2.6-flash-free`
+5. `opencode/big-pickle`
 
-The free lineup changes often. If these names go stale, check `opencode models | grep free` and set `OC_DELEGATE_MODELS`, or edit `default_models` in `bin/oc-delegate`. `nemotron-3-ultra-free` hung with no output in testing, so it's left out.
+The free lineup changes often. If these names go stale, check `opencode models | grep free` and set `OC_DELEGATE_MODELS`, or edit `default_models` in `bin/oc-delegate`. This order comes from a benchmark run on 2026-10-18. Each model got two tasks: docstrings plus pytest tests copied from an example file's style, and a rename across five files that had to leave a similarly named function alone. Each task ran twice.
+
+| Model | Result | Typical time |
+| --- | --- | --- |
+| `beam-free` | clean on every run | 10–26s |
+| `space-bunny-free` | clean on every run (anonymous preview, may disappear) | 22–30s |
+| `deepseek-v4.1-flash-free` | clean on every run | 22–50s |
+| `mimo-v2.6-flash-free` | clean on every run | 40–220s |
+| `big-pickle` | one wrong test assertion | 40–110s |
+| `longcat-2.5-preview-free`, `nemotron-3.5-super-vl-free` | slow, wrong test assertions | 60–320s |
+| `glm-5.3-flash-free` | "Endpoint is unavailable" on 3 of 4 runs | — |
+| `nemotron-3.5-lightning-free` | hung | — |
+
 
 Models are passed with `-m` because opencode v2.0.x ignored the `model:` field in the agent file.
 
