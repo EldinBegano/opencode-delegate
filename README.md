@@ -41,7 +41,24 @@ opencode models | grep -E -- '-free|big-pickle'
 
 The second command should list some free models. If none of the default chain's models appear, see [Models](#models).
 
-## Setup
+## Let Claude Code set it up
+
+Paste this into Claude Code:
+
+```text
+Install the opencode-delegate skill from https://github.com/EldinBegano/opencode-delegate for me.
+
+1. Check the requirements in its README: bash, git, jq, GNU coreutils and opencode. If anything is missing, tell me how to install it on my system and stop. Don't install system packages yourself.
+2. Clone the repo to ~/.local/share/opencode-delegate, or git pull if it's already there. Read install.sh, then run it. If it warns that ~/.local/bin is not on PATH, tell me the line to add to my shell config.
+3. Add "Bash(oc-delegate:*)" to permissions.allow in ~/.claude/settings.json and keep everything else in that file. If you can't edit it, show me the exact JSON to add.
+4. Append claude-md-snippet.md to ~/.claude/CLAUDE.md, unless that file already has an "# opencode delegation" section.
+5. Run the smoke test from the README in a temporary git repo and show me the oc-delegate output and the git diff.
+6. Summarize what you changed. Don't approve any repos for delegation; I'll answer when you first ask.
+```
+
+Start a new Claude Code session afterwards so the skill and the CLAUDE.md section load.
+
+## Manual setup
 
 ### 1. Clone and install
 
