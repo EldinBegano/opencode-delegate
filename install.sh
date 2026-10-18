@@ -65,6 +65,7 @@ place opencode/cc-worker.md "$opencode_dir/agents/cc-worker.md"
 place bin/oc-delegate "$bin_dir/oc-delegate"
 
 [[ ":$PATH:" == *":$bin_dir:"* ]] || echo "warning: $bin_dir is not on PATH" >&2
+command -v bwrap >/dev/null || echo "note: bwrap not found; the worker will run without the filesystem sandbox" >&2
 
 cat <<EOF
 

@@ -8,15 +8,16 @@ allowed-tools: Bash(oc-delegate:*), Bash(git status:*), Bash(git diff:*)
 
 `oc-delegate [-m provider/model]... "task"` (`~/.local/bin/oc-delegate`) runs the opencode agent `cc-worker` (`~/.config/opencode/agents/cc-worker.md`) in the current directory with free models. It prints the model that succeeded, the files it changed, any failed tool calls, then the worker's own summary.
 
-Fallback is automatic. If a model returns a run error (rate limit, quota, unavailable, provider error), goes silent for 120s (`OC_DELEGATE_IDLE`) or passes 600s total (`OC_DELEGATE_TIMEOUT`), the wrapper reverts only the files that model edited and tries the next model. Files changed by anyone else during the run are left alone and listed on stderr. Exit 1 with "all models failed" means every model failed and the tree is back to its pre-run state.
+Fallback is automatic. If a model returns a run error (rate limit, quota, unavailable, provider error), has no output or network traffic for 180s (`OC_DELEGATE_IDLE`) or passes 300s (`OC_DELEGATE_TIMEOUT`), the wrapper reverts only the files that model edited and tries the next model. Files changed by anyone else during the run are left alone and listed on stderr. The whole run stops by 540s (`OC_DELEGATE_TOTAL`), so it always returns inside a 600000 ms Bash timeout. Exit 1 with "all models failed" means every model failed or time ran out, and the tree is back to its pre-run state.
 
 Every model attempt appends a TSV line to `~/.local/state/oc-delegate.log` (override with `OC_DELEGATE_LOG`): time, ok/fail, model, duration, repo, files changed or error, task.
 
 The worker's sandbox:
 - It can list files, find files by name, read, and edit/create files inside the current directory.
 - It has no shell, no grep, no web, no subagents, and no access outside the directory.
-- It cannot read or edit `.env*`, `*secret*`, `*credentials*`, `*.pem`, `*.key` or ssh keys.
-- It refuses to run outside a git repo, so every edit stays reviewable with `git diff`.
+- It cannot read or edit `.git`, `.env*`, `*secret*`, `*credentials*`, `*.pem`, `*.key` or ssh keys.
+- With `bwrap` installed (Linux), it also runs in a filesystem sandbox: only the repo (minus `.git`) and opencode's own data dirs are writable.
+- It refuses to run outside a git repo, so edits to tracked and untracked files are reviewable with `git diff`. Edits to gitignored files are not; the wrapper lists those under `not in git diff`.
 
 ## When to delegate
 
@@ -41,10 +42,11 @@ Do it yourself instead when:
    - exact file paths to read and to change;
    - an example file to copy style from;
    - constraints: no other files, no new dependencies, no comments beyond the existing density.
-   Never put secrets in the prompt.
+   Never put secrets in the prompt. Split jobs that need thousands of lines of new output into several calls: some free endpoints send nothing until a large write is complete, and that looks like a hang.
 3. Run `oc-delegate "<prompt>"` with a Bash timeout of 600000.
 4. Review the result:
    - Check `git diff --stat`, then read the full diff of every file it touched.
+   - Read every file listed under `not in git diff`. Git can't revert those, so restore or delete them yourself if they're wrong, and tell the user.
    - Run the project's tests, linters or build yourself.
    - Fix small problems directly.
    - If the result is mostly wrong, revert only the files the worker touched or created (never the user's earlier changes) and do the task yourself.

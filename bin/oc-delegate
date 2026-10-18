@@ -55,6 +55,17 @@ touched_paths() {
       done | sort -u
 }
 
+outside_diff() {
+  local p rel
+  touched_paths "$1" | while IFS= read -r p; do
+    [[ -f "$p" && "$p" -nt "$tmp/start" ]] || continue
+    rel="${p#"$top"/}"
+    if [[ "$p" != "$top"/* || "/$rel/" == */.git/* ]] || git -C "$top" check-ignore -q -- "$rel"; then
+      printf '%s\n' "$rel"
+    fi
+  done
+}
+
 rollback() {
   local before="$1" out="$2" after status path abs
   after="$(snapshot)"
@@ -75,38 +86,72 @@ rollback() {
   done < <(git diff-tree -r -z --no-renames --name-status "$before" "$after")
 }
 
+tree_pids() {
+  local p
+  echo "$1"
+  for p in $(pgrep -P "$1"); do
+    tree_pids "$p"
+  done
+}
+
+last_recv() {
+  local pids
+  pids="$(tree_pids "$1" | paste -sd'|' -)"
+  { ss -tlnpH; echo --; ss -tinpnH; } 2>/dev/null | awk -v re="pid=($pids)," '
+    $0 == "--" { est = 1; next }
+    !est { if ($0 ~ re) { n = split($4, a, ":"); own[a[n]] = 1 }; next }
+    /^[^ \t]/ { n = split($4, a, ":"); m = split($5, b, ":"); mine = $0 ~ re && !(a[n] in own) && !(b[m] in own); next }
+    mine && match($0, /lastrcv:[0-9]+/) { v = substr($0, RSTART + 8, RLENGTH - 8) + 0; if (min == "" || v < min) min = v }
+    END { if (min != "") print int(min / 1000) }'
+}
+
+stop_worker() {
+  local pids
+  mapfile -t pids < <(tree_pids "$worker")
+  kill "${pids[@]}" 2>/dev/null
+  for _ in 1 2 3 4 5; do
+    kill -0 "$worker" 2>/dev/null || break
+    sleep 1
+  done
+  kill -9 "${pids[@]}" 2>/dev/null
+  wait "$worker" 2>/dev/null
+  worker=""
+}
+
 run_model() {
-  local model="$1" out="$2" pid start last_change size last_size=-1
+  local model="$1" out="$2" budget="$3" start last_change size last_size=-1 recv code
   timed_out=""
-  opencode run --standalone --agent cc-worker -m "$model" --format json \
-    --title "cc: ${task:0:40}" "$task" > "$out" 2> "$tmp/err" &
-  pid=$!
+  touch "$tmp/start"
+  ${sandbox[@]+"${sandbox[@]}"} opencode run --standalone --agent cc-worker -m "$model" --format json \
+    --title "cc: ${task:0:40}" "$task" < /dev/null > "$out" 2> "$tmp/err" &
+  worker=$!
   start=$SECONDS
   last_change=$SECONDS
-  while kill -0 "$pid" 2>/dev/null; do
+  while kill -0 "$worker" 2>/dev/null; do
     sleep 2
     size="$(stat -c %s "$out" 2>/dev/null || echo 0)"
     if [[ "$size" != "$last_size" ]]; then
       last_size="$size"
       last_change=$SECONDS
     fi
+    recv="$(last_recv "$worker")"
+    if [[ -n "$recv" ]] && (( SECONDS - recv > last_change )); then
+      last_change=$((SECONDS - recv))
+    fi
     if (( SECONDS - last_change >= idle )); then
-      timed_out="no output for ${idle}s"
-    elif (( SECONDS - start >= limit )); then
-      timed_out="timed out after ${limit}s"
+      timed_out="no output or network traffic for ${idle}s"
+    elif (( SECONDS - start >= budget )); then
+      timed_out="timed out after ${budget}s"
     fi
     if [[ -n "$timed_out" ]]; then
-      kill "$pid" 2>/dev/null
-      for _ in 1 2 3 4 5; do
-        kill -0 "$pid" 2>/dev/null || break
-        sleep 1
-      done
-      kill -9 "$pid" 2>/dev/null
-      wait "$pid" 2>/dev/null
+      stop_worker
       return 124
     fi
   done
-  wait "$pid"
+  wait "$worker"
+  code=$?
+  worker=""
+  return "$code"
 }
 
 log_run() {
@@ -116,16 +161,53 @@ log_run() {
     "$top" "${detail:0:120}" "${summary:0:100}" >> "$log" 2>/dev/null
 }
 
+interrupted() {
+  trap - INT TERM HUP
+  if [[ -n "$worker" ]]; then
+    stop_worker
+    log_run fail "$model" interrupted
+  fi
+  echo "oc-delegate: interrupted; reverting the worker's edits" >&2
+  rollback "$before" "$out"
+  exit 130
+}
+
 task="$*"
-limit="${OC_DELEGATE_TIMEOUT:-600}"
-idle="${OC_DELEGATE_IDLE:-120}"
+limit="${OC_DELEGATE_TIMEOUT:-300}"
+idle="${OC_DELEGATE_IDLE:-180}"
+total="${OC_DELEGATE_TOTAL:-540}"
 log="${OC_DELEGATE_LOG:-${XDG_STATE_HOME:-$HOME/.local/state}/oc-delegate.log}"
+out="$tmp/out.jsonl"
+worker=""
+
+sandbox=()
+if [[ "${OC_DELEGATE_SANDBOX:-1}" == 0 ]]; then
+  :
+elif command -v bwrap >/dev/null && bwrap --ro-bind / / true 2>/dev/null; then
+  sandbox=(bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp --bind "$top" "$top")
+  [[ -e "$top/.git" ]] && sandbox+=(--ro-bind "$top/.git" "$top/.git")
+  for dir in "${XDG_DATA_HOME:-$HOME/.local/share}" "${XDG_CACHE_HOME:-$HOME/.cache}" "${XDG_STATE_HOME:-$HOME/.local/state}"; do
+    mkdir -p -- "$dir/opencode"
+    sandbox+=(--bind "$dir/opencode" "$dir/opencode")
+  done
+  sandbox+=(--chdir "$PWD" --unshare-pid --die-with-parent --new-session --)
+else
+  echo "oc-delegate: bwrap unavailable; running the worker without the filesystem sandbox" >&2
+fi
+
 before="$(snapshot)"
+trap interrupted INT TERM HUP
+deadline=$((SECONDS + total))
 
 for model in "${models[@]}"; do
-  out="$tmp/out.jsonl"
+  budget=$((deadline - SECONDS))
+  (( budget > limit )) && budget=$limit
+  if (( budget < 30 )); then
+    echo "oc-delegate: ${total}s overall limit reached before trying $model" >&2
+    break
+  fi
   attempt_start=$SECONDS
-  run_model "$model" "$out"
+  run_model "$model" "$out" "$budget"
   code=$?
 
   err="$(jq -r 'select(.type == "error") | "\(.error.type // "error"): \(.error.message // (.error | tostring))"' "$out" 2>/dev/null | tail -n 1)"
@@ -139,6 +221,7 @@ for model in "${models[@]}"; do
   fi
 
   if [[ -z "$err" ]]; then
+    trap - INT TERM HUP
     after="$(snapshot)"
     echo "model: $model"
     echo "changed:"
@@ -147,6 +230,11 @@ for model in "${models[@]}"; do
       sed 's/^/  /' <<< "$changes"
     else
       echo "  (none)"
+    fi
+    hidden="$(outside_diff "$out")"
+    if [[ -n "$hidden" ]]; then
+      echo "not in git diff (gitignored or .git):"
+      sed 's/^/  /' <<< "$hidden"
     fi
     log_run ok "$model" "$(grep -c . <<< "$changes") files changed"
     tool_errors="$(jq -r 'select(.type == "tool_use" and .part.state.status == "error") | "  \(.part.tool): \(.part.state.error // .part.state.output // "" | tostring | .[0:120])"' "$out" 2>/dev/null | head -n 5)"
@@ -158,6 +246,7 @@ for model in "${models[@]}"; do
 
   echo "oc-delegate: $model failed ($err)" >&2
   log_run fail "$model" "$err"
+  outside_diff "$out" | sed 's/^/  not reverted (gitignored or .git): /' >&2
   rollback "$before" "$out"
 done
 

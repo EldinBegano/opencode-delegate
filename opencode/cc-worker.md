@@ -17,6 +17,10 @@ permission:
     "*.key": deny
     "*id_rsa*": deny
     "*id_ed25519*": deny
+    ".git": deny
+    ".git/*": deny
+    "*/.git": deny
+    "*/.git/*": deny
   glob: allow
   grep: deny
   list: allow
@@ -31,6 +35,10 @@ permission:
     "*.key": deny
     "*id_rsa*": deny
     "*id_ed25519*": deny
+    ".git": deny
+    ".git/*": deny
+    "*/.git": deny
+    "*/.git/*": deny
   todowrite: allow
   lsp: allow
 ---

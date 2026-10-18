@@ -12,15 +12,16 @@ Claude Code
        └─ oc-delegate "task"        wrapper script on your PATH
             └─ opencode run --standalone --agent cc-worker -m <free model>
                  ├─ success → prints model, changed files, worker summary
-                 └─ error / 120s silent / 600s total → reverts that model's edits, tries next model
+                 └─ error / 180s idle / 300s → reverts that model's edits, tries next model
+                                                (whole run capped at 540s)
 ```
 
 - **`skill/SKILL.md`**: tells Claude when to delegate (boilerplate, test scaffolding, docs drafts, fixtures, format conversions, mechanical edits across a few files), when not to (design, tricky bugs, security, anything that needs a shell), and how to review the result.
-- **`bin/oc-delegate`**: runs the worker with a fallback chain of free models. If a model fails, hangs or times out, the wrapper reverts only the files that model edited and tries the next one. Your own uncommitted changes are left alone. Every attempt is logged.
-- **`opencode/cc-worker.md`**: a locked-down opencode agent. It can list, read and edit files in the current directory, and nothing else: no shell, no grep, no web, no subagents, no paths outside the directory, and no reading or editing `.env*`, `*secret*`, `*credentials*`, `*.pem`, `*.key` or SSH keys.
+- **`bin/oc-delegate`**: runs the worker with a fallback chain of free models. If a model fails, hangs or times out, the wrapper reverts only the files that model edited and tries the next one. Your own uncommitted changes are left alone. If `bwrap` is installed, the worker runs in a sandbox where only the repo (minus `.git`) and opencode's own data dirs are writable. Every attempt is logged.
+- **`opencode/cc-worker.md`**: a locked-down opencode agent. It can list, read and edit files in the current directory, and nothing else: no shell, no grep, no web, no subagents, no paths outside the directory, and no reading or editing `.git`, `.env*`, `*secret*`, `*credentials*`, `*.pem`, `*.key` or SSH keys.
 - **`claude-md-snippet.md`**: a `CLAUDE.md` section that makes delegation Claude's default for grunt work. Without it, Claude rarely picks the skill on its own.
 
-The wrapper refuses to run outside a git repo, so every edit the worker makes shows up in `git diff`.
+The wrapper refuses to run outside a git repo, so edits to tracked and untracked files show up in `git diff`. Edits to gitignored files don't, so the wrapper lists them separately under `not in git diff`.
 
 ## Requirements
 
@@ -31,6 +32,8 @@ The wrapper refuses to run outside a git repo, so every edit the worker makes sh
 | `bash`, `git`, `jq` | `jq` parses opencode's JSON event stream. |
 | GNU coreutils | `stat -c`, `realpath -m`, `date -Is`. Linux has these. On macOS, install `coreutils` with Homebrew and put its `gnubin` directory first on `PATH`. |
 | `~/.local/bin` on `PATH` | Where the installer puts `oc-delegate`. |
+| `bwrap` (optional, Linux) | [bubblewrap](https://github.com/containers/bubblewrap) sandboxes the worker's filesystem writes. Without it, the worker relies on opencode's permission rules alone. |
+| `ss`, `pgrep` (optional, Linux) | From iproute2 and procps. The wrapper uses them to tell a slow model from a hung one by its network traffic. Without them, only opencode's output counts. |
 
 Install opencode if you don't have it:
 
@@ -139,10 +142,14 @@ oc-delegate -m model-a -m model-b "task"                 # your own chain
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `OC_DELEGATE_MODELS` | the chain below | Space-separated model chain, used when no `-m` is given. |
-| `OC_DELEGATE_TIMEOUT` | `600` | Seconds before a model run is killed and the next model is tried. |
-| `OC_DELEGATE_IDLE` | `120` | Seconds without output before a model counts as hung. |
+| `OC_DELEGATE_TIMEOUT` | `300` | Seconds before a model run is killed and the next model is tried. |
+| `OC_DELEGATE_IDLE` | `180` | Seconds with no opencode output and no network traffic before a model counts as hung. |
+| `OC_DELEGATE_TOTAL` | `540` | Seconds for the whole run across all models. Keep it below Claude Code's 600s Bash timeout. |
+| `OC_DELEGATE_SANDBOX` | `1` | Set to `0` to run the worker without `bwrap`. |
 | `OC_DELEGATE_TAIL` | `40` | Lines of the worker's summary to print. |
 | `OC_DELEGATE_LOG` | `~/.local/state/oc-delegate.log` | Where attempts are logged. |
+
+opencode prints nothing while a model writes a file in a single tool call, so the idle timer also watches the worker's network traffic. A model that keeps streaming stays alive. Some free endpoints send nothing at all until a large write is finished. From outside, that looks exactly like a hang, so very large single-file writes can still trip the idle limit. The skill tells Claude to split those up.
 
 ### Models
 
@@ -184,6 +191,8 @@ Use it to check whether delegation actually happens and which models are pulling
 
 - **Free models may log your prompts and use them for training.** Everything the worker reads in the repo goes to that provider. Don't delegate in confidential repos, and use the approved-repo list in the CLAUDE.md snippet.
 - The worker can't read the secret files listed above, but the deny list matches file names only. A secret inside `config.yaml` will still be readable.
+- The worker can't touch `.git`. Writing there could plant hooks or a `core.fsmonitor` command that runs on the next git call. opencode's permission rules block it, and with `bwrap`, `.git` is also mounted read-only.
+- The worker can edit gitignored files such as `.vscode/`, `node_modules/` or build output. Those edits don't show in `git diff` and can't be reverted by the wrapper, so it lists them under `not in git diff` and the skill tells Claude to check each one.
 - Don't put secrets in task prompts.
 - Don't add `--auto` or run opencode's default agent from Claude. Claude Code's auto-mode safety check blocks that as creating an unsafe agent, which is why the restricted `cc-worker` agent exists.
 - The worker can't run tests or builds. Claude has to verify the result, and the skill tells it to.
