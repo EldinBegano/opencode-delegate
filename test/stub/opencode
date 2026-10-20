@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+# Fake `opencode run` for the tests. The model name picks the behaviour: -m stub/<scenario>.
+# STUB_EDIT: newline-separated paths it appends to and reports as edit tool calls.
+# STUB_PATCH: paths it appends to and reports as apply_patch tool calls.
+# STUB_READ: paths it reports as read tool calls without changing them.
+# STUB_SILENT_EDIT: paths it appends to without reporting, like another process would.
+# STUB_NOEOL: paths it appends to without a final newline, and reports as edits.
+# STUB_NUL: paths it appends NUL bytes to without a final newline, and reports as edits.
+# STUB_PROMPTS: file it appends each prompt to, followed by a line with "--".
+set -u
+
+model="" session="" prompt="${!#}"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -m) model="$2"; shift 2 ;;
+    --session|-s) session="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+
+[[ -n "${STUB_PIDFILE:-}" ]] && echo "$$" >> "$STUB_PIDFILE"
+[[ -n "${STUB_PROMPTS:-}" ]] && printf '%s\n--\n' "$prompt" >> "$STUB_PROMPTS"
+if [[ -n "$session" && "$session" != ses_stub ]]; then
+  echo "unknown session: $session" >&2
+  exit 9
+fi
+
+report() {
+  jq -nc --arg t "$1" --argjson i "$2" '{type: "tool_use", sessionID: "ses_stub", part: {tool: $t, state: {status: "completed", input: $i}}}'
+}
+
+report_edit() {
+  report edit "$(jq -nc --arg p "$1" '{filePath: $p}')"
+}
+
+each() {
+  local p
+  while IFS= read -r p; do
+    [[ -n "$p" ]] || continue
+    "$@" "$p"
+  done
+}
+
+edit_file() {
+  printf '%s %s\n' "$1" "$model" >> "$2"
+  report_edit "$2"
+}
+
+patch_file() {
+  printf 'by %s\n' "$model" >> "$1"
+  report apply_patch "$(jq -nc --arg p "*** Begin Patch"$'\n'"*** Update File: $1"$'\n'"*** End Patch" '{patchText: $p}')"
+}
+
+read_file() {
+  report read "$(jq -nc --arg p "$1" '{filePath: $p}')"
+}
+
+silent_edit() {
+  printf 'silent %s\n' "$model" >> "$1"
+}
+
+noeol_edit() {
+  printf 'noeol %s' "$model" >> "$1"
+  report_edit "$1"
+}
+
+nul_edit() {
+  printf '\0\1' >> "$1"
+  report_edit "$1"
+}
+
+fix_file() {
+  sed -i 's/^broken /fixed /' "$1"
+  report_edit "$1"
+}
+
+edit_files() {
+  each edit_file "${1:-by}" <<< "${STUB_EDIT:-}"
+  each patch_file <<< "${STUB_PATCH:-}"
+  each read_file <<< "${STUB_READ:-}"
+  each noeol_edit <<< "${STUB_NOEOL:-}"
+  each nul_edit <<< "${STUB_NUL:-}"
+  each silent_edit <<< "${STUB_SILENT_EDIT:-}"
+}
+
+echo '{"type":"step_start","sessionID":"ses_stub"}'
+case "${model#stub/}" in
+  ok)
+    edit_files
+    echo '{"type":"text","part":{"text":"done"}}'
+    ;;
+  broken)
+    edit_files broken
+    echo '{"type":"text","part":{"text":"done"}}'
+    ;;
+  fixer)
+    if [[ -n "$session" ]]; then
+      each fix_file <<< "${STUB_EDIT:-}"
+      echo '{"type":"text","part":{"text":"fixed"}}'
+    else
+      edit_files broken
+      echo '{"type":"text","part":{"text":"done"}}'
+    fi
+    ;;
+  error)
+    edit_files
+    echo '{"type":"error","error":{"type":"APIError","message":"rate limited"}}'
+    ;;
+  crash)
+    edit_files
+    echo "boom" >&2
+    exit 3
+    ;;
+  notext)
+    edit_files
+    ;;
+  silent)
+    edit_files
+    sleep 600
+    ;;
+  chatty)
+    edit_files
+    while :; do
+      echo '{"type":"step_start"}'
+      sleep 1
+    done
+    ;;
+  maxsteps)
+    edit_files
+    for _ in $(seq 39); do
+      echo '{"type":"step_start"}'
+    done
+    echo '{"type":"text","part":{"text":"Maximum steps reached, task not finished."}}'
+    ;;
+  malformed)
+    edit_files
+    junk=$'list.txt\noldString">\nby stub'
+    printf 'junk\n' > "$junk"
+    report_edit "$junk"
+    echo '{"type":"text","part":{"text":"done"}}'
+    ;;
+  dotgit)
+    printf 'stub\n' >> .git/description 2>/dev/null
+    report_edit .git/description
+    echo '{"type":"text","part":{"text":"done"}}'
+    ;;
+  *)
+    echo "unknown stub scenario: $model" >&2
+    exit 9
+    ;;
+esac

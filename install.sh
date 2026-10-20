@@ -6,7 +6,7 @@ claude_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 opencode_dir="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
 bin_dir="$HOME/.local/bin"
 
-mode=link
+mode="link"
 case "${1:-}" in
   "") ;;
   --copy) mode=copy ;;

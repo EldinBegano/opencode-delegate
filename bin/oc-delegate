@@ -3,16 +3,21 @@ set -uo pipefail
 
 default_models=(
   opencode/beam-free
-  opencode/space-bunny-free
   opencode/deepseek-v4.1-flash-free
+  opencode/space-bunny-free
   opencode/mimo-v2.6-flash-free
   opencode/big-pickle
 )
 
 models=()
-while getopts m: opt; do
+check="${OC_DELEGATE_CHECK:-}"
+retries="${OC_DELEGATE_RETRIES:-2}"
+check_timeout="${OC_DELEGATE_CHECK_TIMEOUT:-120}"
+while getopts m:c:r: opt; do
   case "$opt" in
     m) models+=("$OPTARG") ;;
+    c) check="$OPTARG" ;;
+    r) retries="$OPTARG" ;;
     *) exit 2 ;;
   esac
 done
@@ -27,7 +32,11 @@ if [[ ${#models[@]} -eq 0 ]]; then
 fi
 
 if [[ $# -eq 0 ]]; then
-  echo "usage: oc-delegate [-m provider/model]... \"task\"" >&2
+  echo "usage: oc-delegate [-m provider/model]... [-c \"check command\"] [-r retries] \"task\"" >&2
+  exit 2
+fi
+if [[ ! "$retries" =~ ^[0-9]+$ || ! "$check_timeout" =~ ^[1-9][0-9]*$ ]]; then
+  echo "oc-delegate: retries must be a whole number and OC_DELEGATE_CHECK_TIMEOUT a positive one" >&2
   exit 2
 fi
 if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -48,16 +57,34 @@ snapshot() {
 }
 
 touched_paths() {
-  jq -r 'select(.type == "tool_use") | .part.state.input | objects | (.path, .filePath) | strings' "$1" 2>/dev/null \
-    | while IFS= read -r p; do
+  jq -j 'select(.type == "tool_use" and (.part.tool | IN("edit", "multiedit", "write", "apply_patch")))
+    | .part.state.input | objects
+    | ((.path, .filePath) | strings),
+      (.patchText | strings | split("\n")[] | capture("^\\*\\*\\* (?:(?:Add|Update|Delete) File|Move to): (?<p>.+)$").p)
+    | . + "\u0000"' "$@" 2>/dev/null \
+    | while IFS= read -r -d '' p; do
         [[ "$p" == /* ]] || p="$PWD/$p"
-        realpath -m -- "$p"
-      done | sort -u
+        realpath -m -z -- "$p"
+      done | sort -zu
+}
+
+# The worker's edit tool often leaves the last line unterminated. Adding the newline here
+# avoids Claude spending a turn per file on it. Binary files are left untouched.
+ensure_final_newlines() {
+  local p rel
+  touched_paths "$@" | while IFS= read -r -d '' p; do
+    [[ -f "$p" && ! -L "$p" && -s "$p" && "$p" == "$top"/* ]] || continue
+    [[ "$(tail -c 1 -- "$p" | od -An -tu1 | tr -d ' ')" == 10 ]] && continue
+    head -c 8192 -- "$p" | od -An -tx1 | grep -qE '(^| )00( |$)' && continue
+    printf '\n' >> "$p"
+    rel="${p#"$top"/}"
+    printf '%s\n' "$rel" >> "$tmp/newlines"
+  done
 }
 
 outside_diff() {
   local p rel
-  touched_paths "$1" | while IFS= read -r p; do
+  touched_paths "$@" | while IFS= read -r -d '' p; do
     [[ -f "$p" && "$p" -nt "$tmp/start" ]] || continue
     rel="${p#"$top"/}"
     if [[ "$p" != "$top"/* || "/$rel/" == */.git/* ]] || git -C "$top" check-ignore -q -- "$rel"; then
@@ -67,13 +94,17 @@ outside_diff() {
 }
 
 rollback() {
-  local before="$1" out="$2" after status path abs
+  local before="$1" after status path abs p
+  local -A touched=()
+  shift
   after="$(snapshot)"
   [[ "$before" == "$after" ]] && return
-  touched_paths "$out" > "$tmp/touched"
+  while IFS= read -r -d '' p; do
+    touched["$p"]=1
+  done < <(touched_paths "$@")
   while IFS= read -r -d '' status && IFS= read -r -d '' path; do
     abs="$top/$path"
-    if ! grep -qxF -- "$abs" "$tmp/touched"; then
+    if [[ -z "${touched["$abs"]:-}" ]]; then
       echo "  left alone (not edited by worker): $path" >&2
       continue
     fi
@@ -119,11 +150,15 @@ stop_worker() {
 }
 
 run_model() {
-  local model="$1" out="$2" budget="$3" start last_change size last_size=-1 recv code
+  local model="$1" budget="$2" prompt="$3" session="$4" start last_change size last_size=-1 recv code
+  local args=(--standalone --agent cc-worker -m "$model" --format json)
+  if [[ -n "$session" ]]; then
+    args+=(--session "$session")
+  else
+    args+=(--title "cc: ${task:0:40}")
+  fi
   timed_out=""
-  touch "$tmp/start"
-  ${sandbox[@]+"${sandbox[@]}"} opencode run --standalone --agent cc-worker -m "$model" --format json \
-    --title "cc: ${task:0:40}" "$task" < /dev/null > "$out" 2> "$tmp/err" &
+  ${sandbox[@]+"${sandbox[@]}"} opencode run "${args[@]}" "$prompt" < /dev/null > "$out" 2> "$tmp/err" &
   worker=$!
   start=$SECONDS
   last_change=$SECONDS
@@ -154,62 +189,27 @@ run_model() {
   return "$code"
 }
 
-log_run() {
-  local summary="${task//[$'\t\n']/ }" detail="${3//[$'\t\n']/ }"
-  mkdir -p -- "$(dirname -- "$log")" 2>/dev/null
-  printf '%s\t%s\t%s\t%ss\t%s\t%s\t%s\n' "$(date -Is)" "$1" "$2" "$((SECONDS - attempt_start))" \
-    "$top" "${detail:0:120}" "${summary:0:100}" >> "$log" 2>/dev/null
-}
-
-interrupted() {
-  trap - INT TERM HUP
-  if [[ -n "$worker" ]]; then
-    stop_worker
-    log_run fail "$model" interrupted
-  fi
-  echo "oc-delegate: interrupted; reverting the worker's edits" >&2
-  rollback "$before" "$out"
-  exit 130
-}
-
-task="$*"
-limit="${OC_DELEGATE_TIMEOUT:-300}"
-idle="${OC_DELEGATE_IDLE:-180}"
-total="${OC_DELEGATE_TOTAL:-540}"
-log="${OC_DELEGATE_LOG:-${XDG_STATE_HOME:-$HOME/.local/state}/oc-delegate.log}"
-out="$tmp/out.jsonl"
-worker=""
-
-sandbox=()
-if [[ "${OC_DELEGATE_SANDBOX:-1}" == 0 ]]; then
-  :
-elif command -v bwrap >/dev/null && bwrap --ro-bind / / true 2>/dev/null; then
-  sandbox=(bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp --bind "$top" "$top")
-  [[ -e "$top/.git" ]] && sandbox+=(--ro-bind "$top/.git" "$top/.git")
-  for dir in "${XDG_DATA_HOME:-$HOME/.local/share}" "${XDG_CACHE_HOME:-$HOME/.cache}" "${XDG_STATE_HOME:-$HOME/.local/state}"; do
-    mkdir -p -- "$dir/opencode"
-    sandbox+=(--bind "$dir/opencode" "$dir/opencode")
-  done
-  sandbox+=(--chdir "$PWD" --unshare-pid --die-with-parent --new-session --)
-else
-  echo "oc-delegate: bwrap unavailable; running the worker without the filesystem sandbox" >&2
-fi
-
-before="$(snapshot)"
-trap interrupted INT TERM HUP
-deadline=$((SECONDS + total))
-
-for model in "${models[@]}"; do
-  budget=$((deadline - SECONDS))
-  (( budget > limit )) && budget=$limit
-  if (( budget < 30 )); then
-    echo "oc-delegate: ${total}s overall limit reached before trying $model" >&2
-    break
-  fi
-  attempt_start=$SECONDS
-  run_model "$model" "$out" "$budget"
+run_check() {
+  local t="$1" code
+  (( t > check_timeout )) && t=$check_timeout
+  (( t < 1 )) && t=1
+  (cd "$top" && exec timeout -k 5 "$t" ${check_sandbox[@]+"${check_sandbox[@]}"} bash -c "$check") \
+    < /dev/null > "$tmp/check.out" 2>&1 &
+  checker=$!
+  wait "$checker"
   code=$?
+  checker=""
+  (( code == 124 )) && echo "check timed out after ${t}s" >> "$tmp/check.out"
+  check_last="$(grep . "$tmp/check.out" | tail -n 1 | cut -c 1-120)"
+  return "$code"
+}
 
+retries_text() {
+  if (( $1 == 1 )); then echo "1 retry"; else echo "$1 retries"; fi
+}
+
+run_error() {
+  local code="$1" text
   err="$(jq -r 'select(.type == "error") | "\(.error.type // "error"): \(.error.message // (.error | tostring))"' "$out" 2>/dev/null | tail -n 1)"
   text="$(jq -r 'select(.type == "text") | .part.text' "$out" 2>/dev/null)"
   if [[ -n "$timed_out" ]]; then
@@ -219,35 +219,168 @@ for model in "${models[@]}"; do
   elif [[ -z "$err" && -z "$text" ]]; then
     err="no response text"
   fi
+  [[ -n "$err" ]] && return
+
+  after="$(snapshot)"
+  if (( $(jq -r 'select(.type == "step_start") | .type' "$out" 2>/dev/null | grep -c .) >= max_steps )); then
+    err="used all $max_steps steps"
+  elif git diff-tree -r -z --no-renames --name-only "$before" "$after" | LC_ALL=C grep -qz '[[:cntrl:]]'; then
+    err="malformed tool calls: file names with control characters"
+  fi
+}
+
+log_run() {
+  local summary="${task//[$'\t\n']/ }" detail="${3//[$'\t\n']/ }" checked="${4:-}"
+  checked="${checked//[$'\t\n']/ }"
+  mkdir -p -- "$(dirname -- "$log")" 2>/dev/null
+  printf '%s\t%s\t%s\t%ss\t%s\t%s\t%s\t%s\n' "$(date -Is)" "$1" "$2" "$((SECONDS - attempt_start))" \
+    "$top" "${detail:0:120}" "${summary:0:100}" "${checked:0:120}" >> "$log" 2>/dev/null
+}
+
+interrupted() {
+  trap - INT TERM HUP
+  if [[ -n "$checker" ]]; then
+    kill "$checker" 2>/dev/null
+    wait "$checker" 2>/dev/null
+  fi
+  [[ -n "$worker" ]] && stop_worker
+  [[ -n "$model" ]] && log_run fail "$model" interrupted "$check_result"
+  if [[ -n "$before" ]]; then
+    echo "oc-delegate: interrupted; reverting the worker's edits" >&2
+    rollback "$before" "$hist" "$out"
+  fi
+  exit 130
+}
+
+task="$*"
+limit="${OC_DELEGATE_TIMEOUT:-300}"
+idle="${OC_DELEGATE_IDLE:-180}"
+total="${OC_DELEGATE_TOTAL:-540}"
+log="${OC_DELEGATE_LOG:-${XDG_STATE_HOME:-$HOME/.local/state}/oc-delegate.log}"
+out="$tmp/out.jsonl"
+hist="$tmp/hist.jsonl"
+: > "$out"
+: > "$hist"
+worker="" checker="" model="" before="" check_on="" check_result="" check_last=""
+attempt_start=$SECONDS
+max_steps="$(sed -n 's/^steps: *\([0-9][0-9]*\).*/\1/p' "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/agents/cc-worker.md" 2>/dev/null | head -n 1)"
+max_steps="${max_steps:-40}"
+
+sandbox=()
+check_sandbox=()
+if [[ "${OC_DELEGATE_SANDBOX:-1}" == 0 ]]; then
+  :
+elif command -v bwrap >/dev/null && bwrap --ro-bind / / true 2>/dev/null; then
+  sandbox=(bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp --bind "$top" "$top")
+  [[ -e "$top/.git" ]] && sandbox+=(--ro-bind "$top/.git" "$top/.git")
+  if [[ -n "$check" ]]; then
+    if bwrap --ro-bind / / --unshare-net true 2>/dev/null; then
+      check_sandbox=("${sandbox[@]}" --unshare-net --unshare-pid --die-with-parent --new-session --)
+    else
+      echo "oc-delegate: bwrap can't cut off the network here; running the check without the sandbox" >&2
+    fi
+  fi
+  for dir in "${XDG_DATA_HOME:-$HOME/.local/share}" "${XDG_CACHE_HOME:-$HOME/.cache}" "${XDG_STATE_HOME:-$HOME/.local/state}"; do
+    mkdir -p -- "$dir/opencode"
+    sandbox+=(--bind "$dir/opencode" "$dir/opencode")
+  done
+  sandbox+=(--chdir "$PWD" --unshare-pid --die-with-parent --new-session --)
+else
+  echo "oc-delegate: bwrap unavailable; running the worker${check:+ and the check} without the filesystem sandbox" >&2
+fi
+
+trap interrupted INT TERM HUP
+deadline=$((SECONDS + total))
+min_start=$(( total < 30 ? total : 30 ))
+
+# A check that fails on the untouched tree would have the worker chase failures it didn't cause.
+if [[ -n "$check" ]]; then
+  if run_check "$((deadline - SECONDS))"; then
+    check_on=1
+  else
+    check_result="already failing before the run; skipped ($check_last)"
+  fi
+fi
+before="$(snapshot)"
+
+for model in "${models[@]}"; do
+  remaining=$((deadline - SECONDS))
+  if (( remaining < min_start )); then
+    echo "oc-delegate: ${total}s overall limit reached before trying $model" >&2
+    break
+  fi
+  budget=$(( remaining < limit ? remaining : limit ))
+  attempt_start=$SECONDS
+  model_end=$((SECONDS + budget))
+  touch "$tmp/start"
+  : > "$hist"
+  : > "$tmp/newlines"
+  [[ -n "$check_on" ]] && check_result=""
+  prompt="$task" session="" tries=0
+
+  while :; do
+    run_model "$model" "$((model_end - SECONDS))" "$prompt" "$session"
+    code=$?
+    cat "$out" >> "$hist"
+    run_error "$code"
+    [[ -z "$err" ]] && ensure_final_newlines "$hist"
+    [[ -n "$err" || -z "$check_on" ]] && break
+    if run_check "$((model_end - SECONDS))"; then
+      check_result="passed"
+      (( tries > 0 )) && check_result="passed after $(retries_text "$tries")"
+      break
+    fi
+    check_result="failed ($check_last)"
+    session="$(jq -r '.sessionID // empty' "$out" 2>/dev/null | head -n 1)"
+    if (( tries >= retries )); then
+      err="check failed: $check_last"
+      (( tries > 0 )) && err="check failed after $(retries_text "$tries"): $check_last"
+      break
+    elif [[ -z "$session" ]]; then
+      err="check failed and no session to continue: $check_last"
+      break
+    elif (( model_end - SECONDS < min_start )); then
+      err="check failed and no time left to retry: $check_last"
+      break
+    fi
+    tries=$((tries + 1))
+    echo "oc-delegate: $model: check failed ($check_last); retry $tries of $retries" >&2
+    prompt="The check \`$check\` failed:
+$(tail -n 60 "$tmp/check.out")
+Fix the cause. Same task and constraints as before. You can't run the check yourself; it runs again when you finish."
+  done
 
   if [[ -z "$err" ]]; then
     trap - INT TERM HUP
-    after="$(snapshot)"
     echo "model: $model"
     echo "changed:"
-    changes="$(git diff-tree -r --no-renames --name-status "$before" "$after")"
+    changes="$(git diff-tree -r --no-renames --name-status "$before" "$(snapshot)")"
     if [[ -n "$changes" ]]; then
       sed 's/^/  /' <<< "$changes"
     else
       echo "  (none)"
     fi
-    hidden="$(outside_diff "$out")"
+    if [[ -s "$tmp/newlines" ]]; then
+      echo "newline: added at end of $(sort -u "$tmp/newlines" | paste -sd, -)"
+    fi
+    [[ -n "$check_result" ]] && echo "check: $check_result"
+    hidden="$(outside_diff "$hist")"
     if [[ -n "$hidden" ]]; then
       echo "not in git diff (gitignored or .git):"
       sed 's/^/  /' <<< "$hidden"
     fi
-    log_run ok "$model" "$(grep -c . <<< "$changes") files changed"
-    tool_errors="$(jq -r 'select(.type == "tool_use" and .part.state.status == "error") | "  \(.part.tool): \(.part.state.error // .part.state.output // "" | tostring | .[0:120])"' "$out" 2>/dev/null | head -n 5)"
+    log_run ok "$model" "$(grep -c . <<< "$changes") files changed" "$check_result"
+    tool_errors="$(jq -r 'select(.type == "tool_use" and .part.state.status == "error") | "  \(.part.tool): \(.part.state.error // .part.state.output // "" | tostring | .[0:120])"' "$hist" 2>/dev/null | head -n 5)"
     [[ -n "$tool_errors" ]] && printf 'tool errors:\n%s\n' "$tool_errors"
     echo "---"
-    printf '%s\n' "$text" | tail -n "${OC_DELEGATE_TAIL:-40}"
+    jq -r 'select(.type == "text") | .part.text' "$hist" 2>/dev/null | tail -n "${OC_DELEGATE_TAIL:-40}"
     exit 0
   fi
 
   echo "oc-delegate: $model failed ($err)" >&2
-  log_run fail "$model" "$err"
-  outside_diff "$out" | sed 's/^/  not reverted (gitignored or .git): /' >&2
-  rollback "$before" "$out"
+  log_run fail "$model" "$err" "$check_result"
+  outside_diff "$hist" | sed 's/^/  not reverted (gitignored or .git): /' >&2
+  rollback "$before" "$hist"
 done
 
 echo "oc-delegate: all models failed (${models[*]})" >&2
