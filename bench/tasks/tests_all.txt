@@ -1,0 +1,4 @@
+Create pytest tests for the three untested modules in src/textkit: tests/test_numbers.py for numbers.py, tests/test_durations.py for durations.py and tests/test_table.py for table.py.
+Read each module first and test its real behaviour: every public function, the Table class and each of its public methods, including the errors they raise and their edge cases.
+Copy the style of tests/test_strings.py: plain functions, pytest.mark.parametrize for tables of inputs, pytest.raises for errors.
+Constraints: create only those three files; do not change src/; no new dependencies; no comments.

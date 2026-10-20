@@ -1,4 +1,4 @@
 # opencode delegation
-- Before writing boilerplate, test scaffolding, docstrings/README/changelog drafts, fixture/data files, format conversions or mechanical edits across a few known files, delegate via the `opencode-delegate` skill (`oc-delegate`) instead of writing it yourself. Skip only when the skill's "do it yourself" list applies.
+- For grunt work that would take roughly 150+ lines of new content or hand edits across several files (boilerplate, test scaffolding, docstrings or type hints, README/changelog drafts, fixture/data files, format conversions), delegate via the `opencode-delegate` skill (`oc-delegate`) instead of writing it yourself. Do smaller jobs, and anything one sed/perl command can do, directly: below that size the delegation overhead costs more Claude usage than it saves. Also skip it when the skill's "do it yourself" list applies.
 - Repos approved for free models: (none yet). Before the first delegation in any other repo, ask the user once whether its contents may go to free models, and add it to this list if they say yes.
-- Every run is logged to `~/.local/state/oc-delegate.log` (TSV: time, ok/fail, model, duration, repo, result, task).
+- Every run is logged to `~/.local/state/oc-delegate.log` (TSV: time, ok/fail, model, duration, repo, result, task, check result).

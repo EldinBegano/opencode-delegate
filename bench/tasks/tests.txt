@@ -1,0 +1,4 @@
+Create tests/test_numbers.py with pytest tests for every function in src/textkit/numbers.py: clamp, percent, round_half_up, mean, median.
+Read src/textkit/numbers.py first and test its real behaviour, including the edge cases it handles: errors it raises, zero division in percent, even and odd lengths in median, rounding halves up.
+Copy the style of tests/test_strings.py: plain functions, pytest.mark.parametrize for tables of inputs, pytest.raises for errors.
+Constraints: create only tests/test_numbers.py; do not change src/; no new dependencies; no comments.

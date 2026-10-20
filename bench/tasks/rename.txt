@@ -1,0 +1,4 @@
+Rename the function parse_row to parse_record everywhere in this project: its definition in src/textkit/records.py and every import, call and mention in src/textkit/report.py, src/textkit/cli.py, tests/test_records.py and README.md.
+Leave the separate function parse_rows_header exactly as it is; it must not be renamed.
+Done when the name parse_row no longer appears anywhere and parse_rows_header is unchanged.
+Constraints: change only those five files; no other changes; no comments.

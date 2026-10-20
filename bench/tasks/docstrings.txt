@@ -1,0 +1,4 @@
+Add a Google-style docstring to every public function (name not starting with "_") in src/textkit/strings.py.
+Each docstring needs a one-line summary, an "Args:" section listing every parameter, and a "Returns:" section.
+Done when all five public functions (slugify, truncate, title_case, count_words, normalize_whitespace) have such a docstring.
+Constraints: change only src/textkit/strings.py; do not change any code, only add docstrings; do not add comments; no new dependencies.

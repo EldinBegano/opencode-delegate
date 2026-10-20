@@ -1,0 +1,166 @@
+{
+  "skill_name": "opencode-delegate",
+  "evals": [
+    {
+      "id": 1,
+      "name": "docstrings",
+      "task": "docstrings",
+      "should_delegate": null,
+      "prompt": "add google-style docstrings to all the public functions in src/textkit/strings.py. don't touch the logic",
+      "expected_output": "Borderline size (~50-80 lines): either choice is fine. If Claude delegates it must review the result; graded on outcome and cost. all five public functions get Args/Returns docstrings and nothing else changes.",
+      "files": [],
+      "expectations": [
+        "if delegated: checked the worker's result itself after delegating",
+        "if delegated: told the user the free model did the work",
+        "every public function in strings.py has a docstring",
+        "docstrings have Args: and Returns: sections",
+        "code is unchanged apart from docstrings",
+        "only src/textkit/strings.py changed",
+        "pytest passes"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "tests",
+      "task": "tests",
+      "should_delegate": null,
+      "prompt": "src/textkit/numbers.py has no tests yet. write tests/test_numbers.py covering all of its functions, same style as tests/test_strings.py",
+      "expected_output": "Borderline size (~50-80 lines): either choice is fine. If Claude delegates it must review the result; graded on outcome and cost. the tests pass and catch planted bugs.",
+      "files": [],
+      "expectations": [
+        "if delegated: checked the worker's result itself after delegating",
+        "if delegated: told the user the free model did the work",
+        "tests/test_numbers.py exists",
+        "tests call all five functions",
+        "the new tests pass (at least 5 tests)",
+        "tests catch at least 3 of 4 planted bugs",
+        "only tests/test_numbers.py changed",
+        "pytest passes"
+      ]
+    },
+    {
+      "id": 3,
+      "name": "rename",
+      "task": "rename",
+      "should_delegate": false,
+      "prompt": "rename parse_row to parse_record across the whole project, tests and README included. careful: parse_rows_header is a different function and has to stay as it is",
+      "expected_output": "One perl/sed command does the rename, so Claude does it directly; parse_rows_header survives and the tests pass.",
+      "files": [],
+      "expectations": [
+        "did the work itself without delegating",
+        "parse_row no longer appears anywhere",
+        "parse_record is defined and used everywhere",
+        "parse_rows_header is untouched",
+        "only the five expected files changed",
+        "pytest passes"
+      ]
+    },
+    {
+      "id": 4,
+      "name": "bug-stays-with-claude",
+      "task": "bug",
+      "should_delegate": false,
+      "prompt": "tests/test_cache.py is failing. figure out what's wrong with the LRU cache and fix it",
+      "expected_output": "Debugging needs judgment, so Claude fixes the off-by-one eviction itself without delegating.",
+      "files": [],
+      "expectations": [
+        "did the work itself without delegating",
+        "pytest passes",
+        "only src/textkit/cache.py changed"
+      ]
+    },
+    {
+      "id": 5,
+      "name": "tiny-edit-stays-with-claude",
+      "task": "tiny",
+      "should_delegate": false,
+      "prompt": "in strings.py count_words takes a param called s, rename it to text",
+      "expected_output": "Writing a delegation prompt would cost more than the edit, so Claude does it directly.",
+      "files": [],
+      "expectations": [
+        "did the work itself without delegating",
+        "count_words takes `text` instead of `s`",
+        "only src/textkit/strings.py changed",
+        "pytest passes"
+      ]
+    },
+    {
+      "id": 6,
+      "name": "docstrings-all-modules",
+      "task": "docstrings_all",
+      "should_delegate": true,
+      "prompt": "add google-style docstrings (Args/Returns where relevant) to every public function, class and method under src/textkit/. don't change any logic",
+      "expected_output": "A larger grunt task (33 docstrings across eight modules): Claude delegates, reviews the diff and runs the tests. This is where delegation should save Claude tokens.",
+      "files": [],
+      "expectations": [
+        "delegated the work to a free model via oc-delegate",
+        "checked the worker's result itself after delegating",
+        "told the user the free model did the work",
+        "every public function, class and method has a docstring",
+        "docstrings have Args:/Returns: where the function takes or returns values",
+        "code is unchanged apart from docstrings",
+        "only the eight module files changed",
+        "pytest passes"
+      ]
+    },
+    {
+      "id": 7,
+      "name": "typehints-all-modules",
+      "task": "typehints_all",
+      "should_delegate": true,
+      "prompt": "add type hints to every public function and method under src/textkit/, parameters and return types. don't change any behaviour",
+      "expected_output": "Hand edits to 31 signatures across eight modules: Claude delegates, reviews the diff and runs the tests.",
+      "files": [],
+      "expectations": [
+        "delegated the work to a free model via oc-delegate",
+        "checked the worker's result itself after delegating",
+        "told the user the free model did the work",
+        "every public function and method has parameter and return annotations",
+        "all annotations resolve",
+        "code is unchanged apart from annotations and imports",
+        "only the eight module files changed",
+        "pytest passes"
+      ]
+    },
+    {
+      "id": 8,
+      "name": "tests-all",
+      "task": "tests_all",
+      "should_delegate": true,
+      "prompt": "numbers.py, durations.py and table.py under src/textkit have no tests. write a full pytest suite for them, one file per module (tests/test_numbers.py, tests/test_durations.py, tests/test_table.py), same style as tests/test_strings.py. cover every public function and method including the error cases",
+      "expected_output": "A big grunt task (~300-500 lines of tests): Claude delegates with the test command as the check, reviews the diff once and fixes only real problems. The tests pass and catch most planted bugs.",
+      "files": [],
+      "expectations": [
+        "delegated the work to a free model via oc-delegate",
+        "checked the worker's result itself after delegating",
+        "told the user the free model did the work",
+        "all three test files exist",
+        "tests call every public function, class and method",
+        "the new tests pass (at least 20 tests)",
+        "tests catch at least 12 of 16 planted bugs",
+        "only the three test files changed",
+        "pytest passes"
+      ]
+    },
+    {
+      "id": 9,
+      "name": "docstrings-all-modules-long",
+      "task": "docstrings_all",
+      "should_delegate": true,
+      "prompt": "add google-style docstrings (Args/Returns where relevant) to every public function, class and method under src/textkit/. don't change any logic",
+      "expected_output": "Same task as docstrings-all-modules, but with ~60k tokens of earlier session context in the system prompt in both configurations, to show how the overhead of each extra turn scales with context size.",
+      "files": [],
+      "expectations": [
+        "delegated the work to a free model via oc-delegate",
+        "checked the worker's result itself after delegating",
+        "told the user the free model did the work",
+        "every public function, class and method has a docstring",
+        "docstrings have Args:/Returns: where the function takes or returns values",
+        "code is unchanged apart from docstrings",
+        "only the eight module files changed",
+        "pytest passes"
+      ],
+      "long_context": true
+    }
+  ]
+}
