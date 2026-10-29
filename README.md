@@ -4,6 +4,10 @@ A [Claude Code](https://claude.com/claude-code) skill that hands low-judgment gr
 
 Claude stays in charge. It decides what to delegate, writes the prompt, runs the free model through a sandboxed worker, then reviews the diff and runs the tests itself.
 
+![Claude Code loading the skill, delegating 33 docstrings to a free model with the tests as the check, then reviewing the diff](docs/demo.gif)
+
+A real headless Claude Code session (`claude -p`) on the benchmark fixture, redrawn as a terminal with the waits cut out. Claude loads the skill, hands 33 docstrings across eight modules to `beam-free` with the tests as the check, reviews the diff and fixes one word. The session cost $0.31 of Claude usage. In round 3 the same task averaged $0.63 without the skill.
+
 ## How it works
 
 ```
@@ -28,7 +32,7 @@ The wrapper refuses to run outside a git repo, so edits to tracked and untracked
 | Need | Notes |
 | --- | --- |
 | Claude Code | Any recent version with skills support. |
-| [opencode](https://opencode.ai) | Tested with v2.0.32. Needs `opencode run --standalone --format json`. The free OpenCode Zen models work without an API key. |
+| [opencode](https://opencode.ai) | Tested with v2.0.32 and v2.1.3. Needs `opencode run --standalone --format json`. The free OpenCode Zen models work without an API key. |
 | `bash`, `git`, `jq` | `jq` parses opencode's JSON event stream. |
 | GNU coreutils | `stat -c`, `realpath -m`, `date -Is`. Linux has these. On macOS, install `coreutils` with Homebrew and put its `gnubin` directory first on `PATH`. |
 | `~/.local/bin` on `PATH` | Where the installer puts `oc-delegate`. |
