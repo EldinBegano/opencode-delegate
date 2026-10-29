@@ -1,5 +1,7 @@
 # opencode-delegate
 
+[English](README.md) | [Français](README.fr.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja.md)
+
 A [Claude Code](https://claude.com/claude-code) skill that hands low-judgment grunt work to free [opencode](https://opencode.ai) models, so your Claude usage goes to the parts that need it.
 
 Claude stays in charge. It decides what to delegate, writes the prompt, runs the free model through a sandboxed worker, then reviews the diff and runs the tests itself.
